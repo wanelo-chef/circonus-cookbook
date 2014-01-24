@@ -28,6 +28,7 @@
 require 'json'
 require 'rest_client'
 require 'uri'
+require 'fileutils'
 
 if RUBY_VERSION =~ /^1\.8/
   class Dir
@@ -42,9 +43,11 @@ end
 
 module RestClient
   class Resource
-    alias :brackets_orig :"[]"
-    def [](resource_name)
-      brackets_orig(URI.escape(resource_name))      
+    unless self.method_defined?(:brackets_orig) then
+      alias :brackets_orig :"[]"    
+      def [](resource_name)
+        brackets_orig(URI.escape(resource_name))      
+      end
     end
   end
 end
@@ -52,27 +55,32 @@ end
 class Circonus
   VERSION = "0.2.0"
   APP_NAME = 'omniti_chef_cookbook'
-  CACHE_PATH = '/var/tmp/chef-circonus'
+  DEFAULT_CACHE_PATH = '/var/tmp/chef-circonus'
+  DEFAULT_TIMEOUT = 30
 
-  attr_writer :app_token, :account
+  attr_writer :api_token
   attr_reader :rest
   attr_writer :last_request_params
+  attr_reader :options
 
+  def initialize(api_token, opts_in={})
+    @api_token = api_token
+    @options = opts_in
+    options[:cache_path] ||= DEFAULT_CACHE_PATH
+    options[:timeout]    ||= DEFAULT_TIMEOUT
+    options[:halt_on_error] = true if options[:halt_on_error].nil?
 
-  def initialize(app_token, api_url)
-    @app_token = app_token
-
-    unless Dir.exists?(CACHE_PATH) then
-      Dir.mkdir(CACHE_PATH)
+    unless Dir.exists?(options[:cache_path]) then
+      Dir.mkdir(options[:cache_path])
     end
 
     headers = {
-      :x_circonus_auth_token => @app_token,
+      :x_circonus_auth_token => @api_token,
       :x_circonus_app_name => APP_NAME,
       :accept => 'application/json',
     }
 
-    @rest = RestClient::Resource.new(api_url, :headers => headers)
+    @rest = RestClient::Resource.new(options[:api_url], {:headers => headers, :timeout => options[:timeout], :open_timeout => options[:timeout]})
 
     me_myself = self
     RestClient.add_before_execution_proc { |req, params| me_myself.last_request_params = params }
@@ -104,7 +112,23 @@ class Circonus
                   'account',
                   'user',
                  ]
-              
+  
+  def raise_or_warn(ex, blurb)
+    
+    message = blurb + make_exception_message(ex)
+
+    if options[:halt_on_error] then
+      raise message
+    else
+      if Object.const_defined?('Chef')
+        chef_module = Object.const_get('Chef')
+        chef_module.const_get('Log').send(:warn, message)
+      else
+        $stderr.puts "WARN: #{message}"
+      end
+    end
+  end
+    
   def bomb_shelter()
     attempts = 0
 
@@ -112,10 +136,10 @@ class Circonus
       result = yield
      
     rescue RestClient::Unauthorized => ex
-      raise "Circonus API error - HTTP 401 (API key missing or unauthorized)\nPro tip: you may not have added an API key under the node[:circonus][:api_token] attribute.  Try visiting the Circonus web UI, clicking on your account, then API Tokens, obtaining a token, and adding it to the attributes for this node.\n If you've already obtained a key, make sure it is authorized within Circonus." + make_exception_message(ex)
+      raise_or_warn ex, "Circonus API error - HTTP 401 (API key missing or unauthorized)\nPro tip: you may not have added an API key under the node[:circonus][:api_token] attribute.  Try visiting the Circonus web UI, clicking on your account, then API Tokens, obtaining a token, and adding it to the attributes for this node.\n If you've already obtained a key, make sure it is authorized within Circonus."
 
     rescue RestClient::Forbidden => ex
-      raise "Circonus API error - HTTP 403 (not authorized)\nPro tip: You are accessing a resource you (or rather, your api token) aren't allowed to.  Naughty!\n" + make_exception_message(ex)
+      raise_or_warn ex,  "Circonus API error - HTTP 403 (not authorized)\nPro tip: You are accessing a resource you (or rather, your api token) aren't allowed to.  Naughty!\n"
 
     rescue RestClient::ResourceNotFound => ex
       # Circonus nodes are eventually consistent.  When creating a check and a rule, often the check won't exist yet, according to circonus.  So we get a 404.  Wait and retry.
@@ -124,21 +148,29 @@ class Circonus
         sleep 1
         retry
       else
-        raise "Circonus API error - HTTP 404 (no such resource)\nPro tip: We tried 3 times already, in case Circonus was syncing.  Check the URL.\n" + make_exception_message(ex)
+        raise_or_warn ex,  "Circonus API error - HTTP 404 (no such resource)\nPro tip: We tried 3 times already, in case Circonus was syncing.  Check the URL.\n"
       end
 
     rescue RestClient::BadRequest => ex
       # Check for out of metrics
       explanation = JSON.parse(ex.http_body)
       if explanation['message'] == 'Usage limit' then
-        raise "Circonus API error - HTTP 400 (Usage Limit)\nPro tip: You are out of metrics!\n" + make_exception_message(ex)
+        raise_or_warn ex,  "Circonus API error - HTTP 400 (Usage Limit)\nPro tip: You are out of metrics!\n"
       else
-        raise "Circonus API error - HTTP 400 (we made a bad request)\nPro tip: Circonus didn't like something about the request contents.  It usually gives a detailed error message in the response body.\n" + make_exception_message(ex)
+        raise_or_warn ex,  "Circonus API error - HTTP 400 (we made a bad request)\nPro tip: Circonus didn't like something about the request contents.  It usually gives a detailed error message in the response body.\n"
       end
 
     rescue RestClient::InternalServerError => ex
-      raise "Circonus API error - HTTP 500 (server's brain exploded)\n" + make_exception_message(ex)
+      raise_or_warn ex,  "Circonus API error - HTTP 500 (server's brain exploded)\n"
+
+    rescue RestClient::RequestTimeout => ex
+      raise_or_warn ex,  "Circonus API error - HTTP Timeout.  Current timeout is #{options[:timeout]}.  You can adjust this setting using the node[:circonus][:timeout] setting.\n"
+
+
     end
+
+
+
 
     result
 
@@ -151,7 +183,7 @@ class Circonus
     message += "HTTP Method: " + @last_request_params[:method].to_s.upcase + "\n"
     reqbod = @last_request_params[:payload].nil? ? '' : JSON.pretty_generate(JSON.parse(@last_request_params[:payload]))
     message += (reqbod.empty? ? '' : "Request body:\n" + reqbod + "\n\n")
-    message += (ex.http_body.empty? ? '' : "Response body:\n" + ex.http_body + "\n\n")
+    message += ((ex.http_body.nil? || ex.http_body.empty?) ? '' : "Response body:\n" + ex.http_body + "\n\n")
 
     # D-BUG
     # message += @last_request_params.inspect()
@@ -174,6 +206,7 @@ class Circonus
 
   #---------------
   # Get Methods  - get_foo(id) - GET /v2/<resource>/id
+  #  Will escalate a 404 if not found
   #---------------
   [rw_resources, ro_resources].flatten.each do |resource_name| 
     method_name = 'get_' + resource_name
@@ -183,6 +216,29 @@ class Circonus
       }
     end
   end
+
+  #---------------
+  # Find Methods  - find_foo(id) - GET /v2/<resource>/id
+  #  Will return nil if not found
+  #---------------
+  [rw_resources, ro_resources].flatten.each do |resource_name| 
+    method_name = 'find_' + resource_name
+    send :define_method, method_name do |resource_id|
+      info = nil
+      begin
+        info = JSON.parse(@rest[resource_name + '/' + resource_id.to_s].get)
+      rescue RestClient::ResourceNotFound => ex
+        # Do nothing
+      rescue Exception => ex
+        # Kinda gross, but just hit it again to get error processing
+        bomb_shelter {
+          info = JSON.parse(@rest[resource_name + '/' + resource_id.to_s].get)
+        }
+      end
+      return info
+    end
+  end
+
 
   #---------------
   # Edit Methods  - edit_foo(id,content_as_ruby_hash) - PUT /v2/<resource>/id
@@ -217,7 +273,12 @@ class Circonus
     method_name = 'delete_' + resource_name
     send :define_method, method_name do |resource_id|
       bomb_shelter {
-        JSON.parse(@rest[resource_name + '/' + resource_id.to_s].delete)
+        rv = @rest[resource_name + '/' + resource_id.to_s].delete
+        if rv == '' then 
+          return {}
+        else          
+          JSON.parse(rv)
+        end
       }
     end
   end
@@ -227,17 +288,24 @@ class Circonus
   #---------------
 
   def load_cache_file (which)
-    if File.exists?(CACHE_PATH + '/' + which) then
-      return JSON.parse(IO.read(CACHE_PATH + '/' + which))
+    if File.exists?(options[:cache_path] + '/' + which) then
+      return JSON.parse(IO.read(options[:cache_path] + '/' + which))
     else
       return {}
     end
   end
 
   def write_cache_file (which, data)
-    File.open(CACHE_PATH + '/' + which, 'w') do |file|
+    File.open(options[:cache_path] + '/' + which, 'w') do |file|
       file.print(JSON.pretty_generate(data))
     end
+  end
+
+  def clear_cache
+    if File.exists?(options[:cache_path]) then
+      FileUtils.rm_rf(options[:cache_path])
+    end
+    Dir.mkdir(options[:cache_path])
   end
 
 

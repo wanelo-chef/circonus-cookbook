@@ -13,7 +13,7 @@ class Circonus
         "l" => :numeric,
         "L" => :numeric,
         "n" => :numeric,
-        "s" => :string,
+        "s" => :text,
       }.freeze
 
       def all
@@ -22,7 +22,7 @@ class Circonus
         # TODO read SSl, path, etc from config
         url = "http://" + target + ":" + node[:nad][:port].to_s + '/'
         content = open(url).read
-        data = JSON.parse(content)
+        data = ::JSON.parse(content)
 
         # Data is a HoHoH
         # Top level keys are nad plugin (script) names
@@ -34,7 +34,12 @@ class Circonus
         flattened = Hash.new
         data.each do |plugin_name, checks|
           checks.each do |check_name, check_details|
-            flattened["#{plugin_name}`#{check_name}"] = NAD_TYPE_TO_CIRCONUS_TYPE[check_details['_type']]
+            full_name = "#{plugin_name}`#{check_name}"
+            flattened[full_name.to_sym] = {
+              :label => full_name,  # No way of knowing a prettier name
+              :type  => NAD_TYPE_TO_CIRCONUS_TYPE[check_details['_type']],
+              :value  => check_details['_value']
+            }
           end
         end
         

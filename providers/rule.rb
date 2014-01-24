@@ -27,18 +27,18 @@ def load_current_resource
   end
 
   # Check to see if the rule exists in the payload of the current (prior state) rule_set
-  if @current_resource.rule_set_resource.exists then
+  if @current_resource.rule_set_resource.exists && !@current_resource.rule_set_resource.payload.nil? then
     # OK, we know we have a payload.  Are we in there as a rule?
     match = @current_resource.rule_set_resource.payload['rules'].find do |rule|
       old = api.all_string_values(rule)
       new = @new_resource.to_payload_hash()
-      # Chef::Log.debug("CHANGE DETECT Rule - Examining existing rule: " + old.inspect())
-      # Chef::Log.debug("CHANGE DETECT Rule - Examining new rule: " + new.inspect())
-      # Chef::Log.debug("CHANGE DETECT Rule - Equals? " + (new == old).inspect())
+      Chef::Log.debug("CCD: Rule - Examining existing rule: " + old.inspect())
+      Chef::Log.debug("CCD: Rule - Examining new rule: " + new.inspect())
+      Chef::Log.debug("CCD: Rule - Equals? " + (new == old).inspect())
       new == old
     end
 
-    # Chef::Log.debug("CHANGE DETECT Rule - In rule.LCR, have match " + match.inspect())
+    Chef::Log.debug("CCD: Rule - In rule.LCR for #{new_resource.name}, have match " + match.inspect())
     
     @current_resource.exists(!match.nil?)
 

@@ -1,3 +1,4 @@
+require 'set'
 include CirconusApiMixin
 
 # In our case, we must do some slight discovery on BOTH states
@@ -7,9 +8,22 @@ def load_current_resource
   # Apply defaults to the desired state
   # TODO - should this be in the resource initialize() ?
   unless @new_resource.target then 
-    if self.respond_to?(:guess_main_ip) then
-      tgt = node['circonus']['target'].empty? ? guess_main_ip() : node['circonus']['target']
+    if node['circonus']['target'] == :guess then
+      # Force guess_main_ip
+      tgt = guess_main_ip()
+    elsif node['circonus']['target'] == :auto then
+      # Force ohai ip address
+      tgt = node[:ipaddress]
+    elsif node['circonus']['target'].empty? then
+      # If we didn't specify anything, use guess_main_ip if available,
+      # otherwise use ohai
+      if self.respond_to?(:guess_main_ip) then
+        tgt = guess_main_ip()
+      else
+        tgt = node[:ipaddress]
+      end
     else
+      # If we specified an explicit target, then use it
       tgt = node['circonus']['target']
     end
     @new_resource.target(tgt)
@@ -23,7 +37,7 @@ def load_current_resource
   end
 
   @current_resource = Chef::Resource::CirconusCheckBundle.new(new_resource.name)
-  @new_resource.current_resource_ref(@current_resource) # Needed for metrics, etc to link to 
+  @new_resource.current_resource_ref = @current_resource # Needed for metrics, etc to link to 
 
   # Copy in target and type - those are the same between existing and desired
   @current_resource.target(@new_resource.target())
@@ -34,7 +48,7 @@ def load_current_resource
     return @current_resource
   end
 
-  # Ok, now we dow what load_current_resource is really supposed to do - determine the existing state
+  # Ok, now we do what load_current_resource is really supposed to do - determine the existing state
 
   if @new_resource.id then
     begin
@@ -51,13 +65,13 @@ def load_current_resource
     # TODO check target
     # In theory we could update the check bundle....
 
-    @current_resource.payload(payload)
-    @current_resource.exists(true)
+    @current_resource.payload = payload
+    @current_resource.exists = true
   else
 
     # No ID provided - do an exhaustive search (though we cache on the target and type)
     ids = api.find_check_bundle_ids(@current_resource.target, @current_resource.type, @new_resource.display_name || @new_resource.name)    
-    # Chef::Log.info("<<<<<<< In bundle.LCR, search result for #{new_resource.name} on tgt #{@current_resource.target} type #{@current_resource.type} is " + ids.inspect)
+    Chef::Log.debug("<<<<<<< In bundle.LCR, search result for #{new_resource.name} on tgt #{@current_resource.target} type #{@current_resource.type} is " + ids.inspect)
 
     unless (ids.empty?) then 
       unless (ids.length == 1) then
@@ -67,27 +81,26 @@ def load_current_resource
       # Fetch it
       candidate_payload = api.get_check_bundle(ids[0])
       @current_resource.id(ids[0])
-      @current_resource.payload(candidate_payload)
-      @current_resource.exists(true)
+      @current_resource.payload = candidate_payload
+      @current_resource.exists = true
     end
   end
 
   # Chef::Log.debug("In bundle.LCR, current check bundle exists is " + @current_resource.exists.inspect)
-  
   if @current_resource.exists then
 
-
+    # Chef::Log.info(">>>>>>>>In bundle.LCR, current check bundle exists and payload is #{@current_resource.payload.inspect}")
     # WORKAROUND - if a check_bundle has been deleted, it will be returned with a single metric, that is an empty hash.  If so, remove that.
-    if @current_resource.payload['status'] == 'deleted' then
+    if ['deleted', 'disabled'].include?(@current_resource.payload['status']) then
       if @current_resource.payload['metrics'].length == 1 && @current_resource.payload['metrics'][0].empty? then
         @current_resource.payload['metrics'] = []
       end
     end
 
     # Deep clone
-    @new_resource.payload(Marshal.load(Marshal.dump(@current_resource.payload)))
+    @new_resource.payload = Marshal.load(Marshal.dump(@current_resource.payload))
     @new_resource.id(@current_resource.id)
-    @new_resource.exists(true)
+    @new_resource.exists = true
   else 
     init_empty_payload
   end
@@ -100,9 +113,10 @@ end
 def init_empty_payload
   payload = {
     'metrics' => [],
-    'config' => {},
+    'config'  => {},
+    'tags'    => [],
   }
-  @new_resource.payload(payload)
+  @new_resource.payload = payload
   
 end
 
@@ -129,6 +143,7 @@ def copy_resource_attributes_into_payload
   @new_resource.payload['config'] = @new_resource.config()
   @new_resource.payload['period'] = @new_resource.period()
   @new_resource.payload['timeout'] = @new_resource.timeout()
+  @new_resource.payload['tags'] = @new_resource.tags()
 
 end
 
@@ -141,34 +156,50 @@ def any_payload_changes?
   changed = false
 
   # Broker list
-  this_changed = @current_resource.payload['brokers'] != @new_resource.payload['brokers']
+  this_changed = Set.new(@current_resource.payload['brokers']) != Set.new(@new_resource.payload['brokers'])
   if (this_changed) then 
-    # Chef::Log.debug("CHANGE_DETECT Check bundle -Saw change on field broker list")
+    Chef::Log.debug("CCD: Check bundle -Saw change on field broker list")
   end
   changed ||= this_changed
 
-  # Config - compare on string values
+  # Config - compare on string values, but allow server to provide defaults
   old = api.all_string_values(@current_resource.payload['config'])
   new = api.all_string_values(@new_resource.payload['config'])
-  this_changed =  old != new
-  if (this_changed) then 
-    # Chef::Log.debug("CHANGE_DETECT Check bundle - Examining existing config: " + old.inspect())
-    # Chef::Log.debug("CHANGE_DETECT Check bundle - Examining new config: " + new.inspect())
-    # Chef::Log.debug("CHANGE_DETECT Check bundle - Saw change on field config")
+  Chef::Log.debug("CCD: Check bundle - Examining existing config: " + old.inspect())
+  Chef::Log.debug("CCD: Check bundle - Examining new config: " + new.inspect())
+  this_changed = false
+  (old.keys + new.keys).uniq.each do |key|
+    if old.has_key?(key) && new.has_key?(key) && new[key] != old[key] then
+      this_changed = true
+      Chef::Log.debug("CCD: Check bundle - Saw change on field config/#{key}, changing from #{old[key]} to #{new[key]}")
+    elsif (!old.has_key?(key)) && new.has_key?(key) then
+      this_changed = true
+      Chef::Log.debug("CCD: Check bundle - Saw change on field config/#{key}, creating new value #{new[key]}")
+      # If old has a key and new doesn't, no change - that's the server setting a default
+    end
+    changed ||= this_changed
   end
-  changed ||= this_changed
   
-
-
   # Type and display_name are identities
+
+  # Period and timeout are simple strings
   ['period', 'timeout' ].each do |field| 
     this_changed = @current_resource.payload[field].to_s != @new_resource.payload[field].to_s
     if this_changed then
-      # Chef::Log.debug("CHANGE_DETECT Check bundle - Current #{field}:" + @current_resource.payload[field].inspect())
-      # Chef::Log.debug("CHANGE_DETECT Check bundle - New #{field}:" + @new_resource.payload[field].inspect())
-      # Chef::Log.debug("CHANGE_DETECT Check bundle - Saw change on field #{field}")
+      Chef::Log.debug("CCD: Check bundle - Current #{field}:" + @current_resource.payload[field].inspect())
+      Chef::Log.debug("CCD: Check bundle - New #{field}:" + @new_resource.payload[field].inspect())
+      Chef::Log.debug("CCD: Check bundle - Saw change on field #{field}")
     end
     changed ||= this_changed
+  end
+
+  # Tags is an array of strings - sort and stringify first!
+  @current_resource.payload['tags'] ||= []
+  @current_resource.payload['tags'] = @current_resource.payload['tags'].map { |t| t.to_s }.sort
+  @new_resource.payload['tags'] = @new_resource.payload['tags'].map { |t| t.to_s }.sort
+  if @current_resource.payload['tags'] != @new_resource.payload['tags'] then
+    changed = true
+    Chef::Log.debug("CCD: Check bundle - Saw change on field 'tags' old value #{@current_resource.payload['tags'].join(',')} new value #{@new_resource.payload['tags'].join(',')}")
   end
 
   changed
@@ -183,7 +214,6 @@ def action_create
     Chef::Log.info("Doing nothing for circonus_check_bundle[#{@current_resource.name}] because node[:circonus][:enabled] is false")
     return
   end
-
 
   # We don't actually do anything here
   # Other than decide whether to add a late upload notification  
@@ -202,6 +232,32 @@ def action_create
 
 end
 
+
+def action_delete
+  # If we are in fact disabled, return now
+  unless (node['circonus']['enabled']) then
+    Chef::Log.info("Doing nothing for circonus_check_bundle[#{@current_resource.name}] because node[:circonus][:enabled] is false")
+    return
+  end
+
+  # We don't actually do anything here
+  # Other than decide whether to add a late upload notification  
+  unless @current_resource.exists then
+    # Chef::Log.info(">>>>>>>CB.action_delete - current resource does not exist - never created?")
+    # Never created?
+    return
+  end
+
+  # Old API bug had two different values for the status
+  unless @current_resource.payload['status'] == 'deleted' || @current_resource.payload['status'] == 'disabled' then
+    # Chef::Log.info(">>>>>>>CB.action_delete - injecting upload action")
+    @new_resource.updated_by_last_action(true)
+    @new_resource.delete_requested = true
+    @new_resource.notifies(:upload, @new_resource, :delayed)        
+  end
+
+end
+
 def action_upload
 
   # If we are in fact disabled, return now
@@ -210,28 +266,46 @@ def action_upload
     return
   end
 
-  # At this point we assume @new_resource.payload is correct
+  # OK, three cases: 
+  #  create new check bundle
+  #  edit existing check bundle
+  #  delete check bundle
 
-  # Chef::Log.debug("About to upload check_bundle, have payload:\n" + JSON.pretty_generate(@new_resource.payload))
 
-  if @new_resource.exists then
+  
+
+  if @new_resource.exists && ! @new_resource.delete_requested then
     Chef::Log.info("Upload: EDIT mode, id " + @new_resource.id)
 
     # Fixup the payload: force the status to be active, if it is currently deleted
     # elsewise circonus throws a 400 error
-    # TODO - will have to be smarter if we ever support an actual delete action
     if @new_resource.payload['status'] == 'disabled' or @new_resource.payload['status'] == 'deleted' then
       @new_resource.payload['status'] = 'active'
     end
 
+    Chef::Log.debug("About to upload check_bundle, have payload:\n" + JSON.pretty_generate(@new_resource.payload))
+
+    # At this point we assume @new_resource.payload is correct
+    # (was set by metrics, probably)
     api.edit_check_bundle(@new_resource.id, @new_resource.payload)
+
+  elsif @new_resource.exists && @new_resource.delete_requested then
+    Chef::Log.info("Upload: DELETE mode, id " + @new_resource.id)
+    Chef::Log.debug("About to upload check_bundle, have payload:\n" + JSON.pretty_generate(@new_resource.payload))
+    api.delete_check_bundle(@new_resource.id)    
+
   else
     Chef::Log.info("Upload: CREATE mode")
+    Chef::Log.debug("About to upload check_bundle, have payload:\n" + JSON.pretty_generate(@new_resource.payload))
+
+    # At this point we assume @new_resource.payload is correct
+    # (was set by metrics, probably)
     new_bundle = api.create_check_bundle(@new_resource.payload)
 
     # parse out and store the ID - we need this in case we are creating dependents (like rulesets) in this run
     @new_resource.id(new_bundle['_cid'].gsub('/check_bundle/', ''))
     @new_resource.current_resource_ref.id(@new_resource.id)
+    Chef::Log.debug("New check_bundle id is: #{@new_resource.id}")
   end
   @new_resource.updated_by_last_action(true)
 end

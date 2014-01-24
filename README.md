@@ -11,11 +11,11 @@
       * circonus_graph
       * circonus_graph_datapoint
     * A default recipe that uses the node attributes to create the above resources
+    * Ability to ignore configure API timeout and optionally continue despite API errors
 
 ## TODO List
 
-    * None of the resources offer :delete actions yet
-    * Graph resource lacks facilities for access keys, guides, and composites
+    * Most of the resources do not offer :delete actions yet (check_bundle does)
     * Support for graphs in default recipe (attribute walker)
     * Ability to control order of rules
     * LWRP for worksheets
@@ -34,13 +34,15 @@ Manages a check bundle on circonus.  Note that you MUST have at least one circon
 
 Actions:
     * :create - Create/Manage the check bundle
+    * :delete - Delete the check bundle and all its metrics (WARNING: DATA LOSS).
 
 Resource Attributes:
 
     * display_name - Display name of bundle, will appear in email subjects.  Uses resource name if not provided.
-    * target - Hostname or IP to query.  Defaults to node[:circonus][:target], which defaults to the node's guess_main_ip() according to NetInfo.
+    * target - Hostname or IP to query.  Defaults to node[:circonus][:target], which in turn defaults to the node's guess_main_ip() according to NetInfo. If NetInfo isn't present, then it defaults to node[:ipaddress].
     * type - Type of check, like :resmon or :http    
     * brokers - Array of broker names.  Defaults to node[:circonus][:default_brokers]
+    * tags - Array of freeform strings to be used as tags in the web UI.  Default [ ] 
     * config - Hash of options specific to the check bundle type.  See https://circonus.com/resources/api/calls#check_bundles 
 
 Example:
@@ -121,10 +123,10 @@ Resource Attributes:
     * criteria - Operator to use to detect a match of the rule.  Valid values:
         * 'min value' - for numeric metrics
         * 'max value' - for numeric metrics
-        * 'match' - regex, for text metrics
-        * 'does not match' - regex, for text metrics
-        * 'contains' - string, for text metrics
-        * 'does not contain' - string, for text metrics
+        * 'match' - exact match for text metrics
+        * 'does not match' - exact match for text metrics
+        * 'contains' - regex, for text metrics.  If the regex matches, the alert fires.
+        * 'does not contain' - regex, for text metrics.  If the regex does not match, the alert fires.
         * 'on change' - for text metrics, compares to last detected value
         * 'on absence' - for all metrics, detects metric loss of signal
     * severity - Integer severity level, 1-5.  If this rule matches, the contact group(s) assigned in the rule_set to this severity level will be notified.
@@ -155,6 +157,7 @@ Resource Attributes:
 
     * id - optional, GUID of the graph.  If provided, you can change the name of the graph; if omitted, changing the name of the graph will create a new graph.
     * style - :line or :area
+    * tags - Array of freeform strings to be used as tags in the web UI.  Default [ ] 
     * max_left_y, max_right_y, min_left_y, min_right_y - Y Axis limits
 
 ### circonus_graph_datapoint
@@ -231,18 +234,31 @@ Currently very few check types are supported by MetricScanner - only ping and na
     :circonus => {
 
         # Set this to false if you want to disable circonus actions
-        :enabled => true, # Note: is set to false in vagranted-base
+        :enabled => true,
 
         # These attributes control behavior of the circonus cookbook at a low-level
         :api_token => 'some-string-here',  # Required - see  https://circonus.com/resources/api#authentication
         # Note: app_token is a deprecated alias for api_token
 
-        :target => '{{guess_main_ip()}}',           # By default, uses value of NetInfo.guess_main_ip
+        :target => 'your-ip',           # By default, uses guess_main_ip() or node[:ipaddress], specify :guess or :auto to force one of these methods.
         :default_brokers => [ ],           # List of names of brokers, like 'agent-il-1', to use when creating check bundles        
 
+        # Path to a directory in which we will cache circonus config data
+        :cache_path => '/var/tmp/chef-circonus',
 
-        # The remaining attrs are a convenience
-        # this tree gets interpreted by the circonus::default recipe to create chef resources from the node attributes
+        # Set to true to clear the cache at the beginning of each run.  This can help some
+        # API errors when nodes are rapidly provisioned/deprovisioned.
+        :clear_cache_on_start => false, 
+
+        # Timeout in seconds for API HTTP requests
+        :timeout => 10,
+
+        # Set this to false to treat API errors as warnings, continuing the chef run.
+        # Not all errors can be ignored.
+        :halt_on_error => true,
+
+        # The remaining attrs are a convenience, for creating checks/metrics/rules from node attributes.
+        # this tree gets interpreted by the circonus::default recipe
         :check_bundles => {
            'check bundle name' => {
               # These are required
@@ -297,4 +313,22 @@ Currently very few check types are supported by MetricScanner - only ping and na
         }       
 
     }
+
+# Contributing
+
+The main repo is at https://github.com/omniti-labs/circonus-cookbook - please fork, make a topic branch, and send a pull request when you want to submit.  
+
+# Authors
+
+## Maintainers
+
+  Clinton Wolfe
+
+## Contributors
+
+  Eric Saxby
+  Mark Harrison
+
+
+
 

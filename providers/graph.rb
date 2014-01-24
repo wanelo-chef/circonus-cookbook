@@ -72,6 +72,7 @@ def copy_resource_attributes_into_payload
 
   p = @new_resource.payload
 
+  # These are all strings
   [
    'max_left_y',
    'max_right_y',
@@ -91,6 +92,8 @@ def copy_resource_attributes_into_payload
   # guides - not touched
   # composites - not touched
 
+  # Tags is an array
+  @new_resource.payload['tags'] = @new_resource.tags()
   
 end
 
@@ -100,9 +103,7 @@ def any_payload_changes?
   # We don't look at graph_datapoints, because when a datapoint changes, it sends
   # an upload action notification to us anyway
 
-  # We don't manage guides, composites, or access keys
-
-  # These can all legitamitely change
+  # These can all legitimately change, and are all strings
 
   [
    'max_left_y',
@@ -116,9 +117,18 @@ def any_payload_changes?
     new = @new_resource.payload[field].to_s
     this_changed = old != new
     if this_changed then
-      Chef::Log.info("Circonus graph '#{@new_resource.name} shows field #{field} changed from '#{old}' to '#{new}'")
+      Chef::Log.debug("CCD: Circonus graph '#{@new_resource.name} shows field #{field} changed from '#{old}' to '#{new}'")
     end
     changed ||= this_changed
+  end
+
+  # Tags is an array of strings - sort and stringify first!
+  @current_resource.payload['tags'] ||= []
+  @current_resource.payload['tags'] = @current_resource.payload['tags'].map { |t| t.to_s }.sort
+  @new_resource.payload['tags'] = @new_resource.payload['tags'].map { |t| t.to_s }.sort
+  if @current_resource.payload['tags'] != @new_resource.payload['tags']
+    Chef::Log.debug("CCD: Circonus graph '#{@new_resource.name} shows field tags changed from '#{@current_resource.payload['tags'].join(',')}' to '#{@new_resource.payload['tags'].join(',')}'")
+    changed = true
   end
 
   return changed
@@ -148,11 +158,27 @@ def ensure_all_datapoints_have_check_id_present
 end
 
 def workaround_alpha_roundtrip_bug 
+  #   For a while, datapoints created without an explicit alpha setting 
+  # would be created correctly, but when fetched, they would have a 
+  # present-but-null alpha value.  Since the library tries to roundtrip
+  # everything, it would POST/PUT the datapoint with an explicit null 
+  # for alpha, which would then be rejected by the API.
+  #   As of 2013-07-23, this is supposedly fixed, but existing datapoints
+  # might be returned in a broken state.  So, we retain
+  # this workaround just in case.
   new_resource.payload['datapoints'].each do |datapoint_payload|
     if datapoint_payload['alpha'].nil? then
-      datapoint_payload['alpha'] = 255
+      datapoint_payload['alpha'] = 0.3
     end
   end
+end
+
+def scrub_payload
+  # We maintain some references to chef resources in the payload :(
+  # This is yeccky and should be fixed
+  # While the API currently ignores it, it's a lot of garbage to send
+  @new_resource.payload['datapoints'].each { |dp| dp.delete('metric_resource') }
+  
 end
 
 def action_create
@@ -183,12 +209,12 @@ def action_upload
     return
   end
 
+  ensure_all_datapoints_have_check_id_present  
+  workaround_alpha_roundtrip_bug
+  scrub_payload
+
   # At this point we assume @new_resource.payload is correct
   Chef::Log.debug("About to upload graph, have payload:\n" + JSON.pretty_generate(@new_resource.payload))
-
-  ensure_all_datapoints_have_check_id_present
-  workaround_alpha_roundtrip_bug
-
 
   if @new_resource.exists then
     Chef::Log.info("Circonus graph upload: EDIT mode, id " + @new_resource.id)

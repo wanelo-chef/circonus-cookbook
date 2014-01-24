@@ -37,19 +37,14 @@ def load_current_resource
 
     @current_resource.id(ruleset_id)
 
-    # It's legit for the metric to exist, but not have a ruleset
-    begin
-      @current_resource.payload(api.get_rule_set(ruleset_id))
+    # It's legit for the metric to exist, but not have a ruleset.  So, call find, not get.
+    existing_rule_set = api.find_rule_set(ruleset_id)
+    if existing_rule_set then
+      @current_resource.payload(existing_rule_set)
       @current_resource.exists(true)
-    rescue RuntimeError => ex
-      if ex.to_s.include?('Circonus API error - HTTP 404') then
-        @current_resource.exists(false)
-      else
-        # somthing else broke, re-raise
-        raise ex
-      end
+    else
+      @current_resource.exists(false)
     end
-
   end
 
   # If the ruleset currently exists, then copy in to the new resource.
@@ -75,11 +70,15 @@ def init_empty_payload
     'rules' => [],
     'link' => '',
     'notes' => '',
+    'derive' => nil,
   }
   @new_resource.payload(payload)
 end
 
 def copy_resource_attributes_into_payload
+
+  # Wha...?
+  init_empty_payload if @new_resource.payload.nil?
 
   p = @new_resource.payload
 
@@ -124,6 +123,9 @@ def copy_resource_attributes_into_payload
 end
 
 def any_payload_changes?
+
+  return true if @current_resource.payload.nil?
+
   changed = false
 
   # check, metric name, and metric type are identities - must not change
@@ -134,8 +136,8 @@ def any_payload_changes?
   # These can all legitamitely change
 
   [ 'link', 'notes', 'derive'].each do |field|   
-    old = @current_resource.payload[field]
-    new = @new_resource.payload[field]
+    old = @current_resource.payload[field].to_s
+    new = @new_resource.payload[field].to_s
     this_changed = old != new
     if this_changed then
       Chef::Log.debug("Circonus ruleset shows field #{field} changed from '#{old.to_s}' to '#{new.to_s}'")
@@ -177,6 +179,19 @@ def ensure_check_id_present
     
 end
 
+def provide_dummy_values_for_zero_arg_criteria
+  # For any rules with criteria 'on absence' or 'on change', no value attribute 
+  # should be required, but the API requires one.  
+  # Send an empty string as a dummy.
+  
+  @new_resource.payload['rules'].each do |rule|
+    next unless ['on absence', 'on change'].include?(rule['criteria'])
+    next if rule.has_key?('value')
+    rule['value'] = ''
+  end
+
+end
+
 
 def action_create
   # If we are in fact disabled, return now
@@ -209,6 +224,7 @@ def action_upload
 
   # May or may not have a check_id at this point, but we should be able to determine it
   ensure_check_id_present
+  provide_dummy_values_for_zero_arg_criteria
 
   # At this point we assume @new_resource.payload is correct
   Chef::Log.debug("About to upload rule_set, have payload:\n" + JSON.pretty_generate(@new_resource.payload))
