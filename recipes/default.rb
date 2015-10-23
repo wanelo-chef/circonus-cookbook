@@ -4,8 +4,7 @@
 # node attributes
 
 chef_gem 'rest_client' do
-  compile_time true
-end
+end.run_action(:install)
 
 require 'json'
 require 'rest_client'
@@ -14,7 +13,7 @@ require 'fileutils'
 require 'open-uri'
 require 'rexml/document'
 
-module RestClient
+module ::RestClient
   class Resource
     unless self.method_defined?(:brackets_orig) then
       alias :brackets_orig :"[]"
