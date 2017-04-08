@@ -1,6 +1,3 @@
-require 'open-uri'
-require 'rexml/document' # missu nokogiri
-# require 'pp'
 require File.expand_path(File.dirname(__FILE__) + '/check_type')
 
 class Circonus

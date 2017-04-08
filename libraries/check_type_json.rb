@@ -1,5 +1,3 @@
-require 'open-uri'
-require 'json'
 require File.expand_path(File.dirname(__FILE__) + '/check_type')
 
 class Circonus

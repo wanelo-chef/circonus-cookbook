@@ -3,6 +3,26 @@
 # Register Circonus checks, metrics, and rules based on the contents of 
 # node attributes
 
+chef_gem 'rest_client' do
+end.run_action(:install)
+
+require 'json'
+require 'rest_client'
+require 'uri'
+require 'fileutils'
+require 'open-uri'
+require 'rexml/document'
+
+module ::RestClient
+  class Resource
+    unless self.method_defined?(:brackets_orig) then
+      alias :brackets_orig :"[]"
+      def [](resource_name)
+        brackets_orig(URI.escape(resource_name))
+      end
+    end
+  end
+end
 
 # This recipe is kinda stupid - just slavishly translates attribute structures into the equivalent resource structures.
 

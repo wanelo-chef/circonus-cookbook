@@ -24,12 +24,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-require 'json'
-require 'rest_client'
-require 'uri'
-require 'fileutils'
-
 if RUBY_VERSION =~ /^1\.8/
   class Dir
     class << self
@@ -37,17 +31,6 @@ if RUBY_VERSION =~ /^1\.8/
         File.directory?(path)
       end
       alias_method :exist?, :exists?
-    end
-  end
-end
-
-module RestClient
-  class Resource
-    unless self.method_defined?(:brackets_orig) then
-      alias :brackets_orig :"[]"    
-      def [](resource_name)
-        brackets_orig(URI.escape(resource_name))      
-      end
     end
   end
 end
