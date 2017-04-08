@@ -63,10 +63,10 @@ class Circonus
       :accept => 'application/json',
     }
 
-    @rest = RestClient::Resource.new(options[:api_url], {:headers => headers, :timeout => options[:timeout], :open_timeout => options[:timeout]})
+    @rest = ::RestClient::Resource.new(options[:api_url], {:headers => headers, :timeout => options[:timeout], :open_timeout => options[:timeout]})
 
     me_myself = self
-    RestClient.add_before_execution_proc { |req, params| me_myself.last_request_params = params }
+    ::RestClient.add_before_execution_proc { |req, params| me_myself.last_request_params = params }
 
   end
 
@@ -118,13 +118,13 @@ class Circonus
     begin
       result = yield
      
-    rescue RestClient::Unauthorized => ex
+    rescue ::RestClient::Unauthorized => ex
       raise_or_warn ex, "Circonus API error - HTTP 401 (API key missing or unauthorized)\nPro tip: you may not have added an API key under the node[:circonus][:api_token] attribute.  Try visiting the Circonus web UI, clicking on your account, then API Tokens, obtaining a token, and adding it to the attributes for this node.\n If you've already obtained a key, make sure it is authorized within Circonus."
 
-    rescue RestClient::Forbidden => ex
+    rescue ::RestClient::Forbidden => ex
       raise_or_warn ex,  "Circonus API error - HTTP 403 (not authorized)\nPro tip: You are accessing a resource you (or rather, your api token) aren't allowed to.  Naughty!\n"
 
-    rescue RestClient::ResourceNotFound => ex
+    rescue ::RestClient::ResourceNotFound => ex
       # Circonus nodes are eventually consistent.  When creating a check and a rule, often the check won't exist yet, according to circonus.  So we get a 404.  Wait and retry.
       attempts = attempts + 1
       if attempts < 3 then
@@ -134,7 +134,7 @@ class Circonus
         raise_or_warn ex,  "Circonus API error - HTTP 404 (no such resource)\nPro tip: We tried 3 times already, in case Circonus was syncing.  Check the URL.\n"
       end
 
-    rescue RestClient::BadRequest => ex
+    rescue ::RestClient::BadRequest => ex
       # Check for out of metrics
       explanation = JSON.parse(ex.http_body)
       if explanation['message'] == 'Usage limit' then
@@ -143,10 +143,10 @@ class Circonus
         raise_or_warn ex,  "Circonus API error - HTTP 400 (we made a bad request)\nPro tip: Circonus didn't like something about the request contents.  It usually gives a detailed error message in the response body.\n"
       end
 
-    rescue RestClient::InternalServerError => ex
+    rescue ::RestClient::InternalServerError => ex
       raise_or_warn ex,  "Circonus API error - HTTP 500 (server's brain exploded)\n"
 
-    rescue RestClient::RequestTimeout => ex
+    rescue ::RestClient::RequestTimeout => ex
       raise_or_warn ex,  "Circonus API error - HTTP Timeout.  Current timeout is #{options[:timeout]}.  You can adjust this setting using the node[:circonus][:timeout] setting.\n"
 
 
@@ -210,7 +210,7 @@ class Circonus
       info = nil
       begin
         info = JSON.parse(@rest[resource_name + '/' + resource_id.to_s].get)
-      rescue RestClient::ResourceNotFound => ex
+      rescue ::RestClient::ResourceNotFound => ex
         # Do nothing
       rescue Exception => ex
         # Kinda gross, but just hit it again to get error processing
