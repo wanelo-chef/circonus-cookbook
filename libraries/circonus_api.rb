@@ -35,12 +35,6 @@ if RUBY_VERSION =~ /^1\.8/
   end
 end
 
-chef_gem 'rest_client' do
-  action :install
-  compile_time true
-end
-
-require 'rest_client'
 
 class Circonus
   VERSION = "0.2.0"
@@ -70,6 +64,7 @@ class Circonus
       :accept => 'application/json',
     }
 
+    require 'rest_client'
     @rest = ::RestClient::Resource.new(options[:api_url], {:headers => headers, :timeout => options[:timeout], :open_timeout => options[:timeout]})
 
     me_myself = self
